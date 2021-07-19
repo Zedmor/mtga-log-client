@@ -34,6 +34,8 @@ from collections import defaultdict, namedtuple
 import dateutil.parser
 import requests
 
+from local_processor import Processor
+
 LOG_FOLDER = os.path.join(os.path.expanduser('~'), '.seventeenlands')
 if not os.path.exists(LOG_FOLDER):
     os.makedirs(LOG_FOLDER)
@@ -48,7 +50,7 @@ logger = logging.getLogger('17Lands')
 for handler in handlers:
     handler.setFormatter(log_formatter)
     logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 logger.info(f'Saving logs to {LOG_FILENAME}')
 
 CLIENT_VERSION = '0.1.26.p'
@@ -127,6 +129,7 @@ IS_CODE_FOR_RETRY = lambda code: code >= 500 and code < 600
 IS_SUCCESS_CODE = lambda code: code >= 200 and code < 300
 DEFAULT_RETRY_SLEEP_TIME = 1
 
+processor = Processor()
 
 def extract_time(time_str):
     """
@@ -244,6 +247,9 @@ class Follower:
             time.sleep(sleep_time)
         logger.info(f'{response.status_code} Response: {response.text}')
         return response
+
+    def __retry_post(self, endpoint, blob, num_retries=RETRIES, sleep_time=DEFAULT_RETRY_SLEEP_TIME, use_gzip=False):
+        pass
 
     def parse_log(self, filename, follow):
         """
@@ -711,6 +717,7 @@ class Follower:
                 'card_ids': [int(x) for x in json_obj['DraftPack']],
             }
             logger.info(f'Draft pack: {pack}')
+            processor.draft_pack(pack)
             response = self.__retry_post(f'{self.host}/{ENDPOINT_DRAFT_PACK}', blob=pack)
 
     def __handle_draft_pick(self, json_obj):
@@ -728,6 +735,7 @@ class Follower:
             'card_id': int(inner_obj['cardId']),
         }
         logger.info(f'Draft pick: {pick}')
+        processor.draft_pick(pick)
         response = self.__retry_post(f'{self.host}/{ENDPOINT_DRAFT_PICK}', blob=pick)
 
     def __handle_joined_pod(self, json_obj):
@@ -753,6 +761,7 @@ class Follower:
             'card_id': int(inner_obj['cardId']),
         }
         logger.info(f'Human draft pick: {pick}')
+        processor.human_draft_pick(pick)
         response = self.__retry_post(f'{self.host}/{ENDPOINT_HUMAN_DRAFT_PICK}', blob=pick)
 
     def __handle_human_draft_pack(self, json_obj):
@@ -769,6 +778,7 @@ class Follower:
             'card_ids': [int(x) for x in json_obj['PackCards'].split(',')],
         }
         logger.info(f'Human draft pack: {pack}')
+        processor.human_draft_pack(pack)
         response = self.__retry_post(f'{self.host}/{ENDPOINT_HUMAN_DRAFT_PACK}', blob=pack)
 
     def __handle_draft_notification(self, json_obj):
