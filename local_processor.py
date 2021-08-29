@@ -1,7 +1,7 @@
 import datetime
 import json
 import pathlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import requests
 from termcolor import colored
@@ -56,6 +56,8 @@ class Processor:
     (https://mtgatool.com/) could find in it github :(
     """
 
+    archetypes = ['WU', 'WB', 'WR', 'WG', 'UB', 'UR', 'UG', 'BR', 'BG', 'RG', 'XX']
+
     def __init__(self):
         with open('resources/database.json', encoding='utf8') as db_file:
             self.db = json.load(db_file)
@@ -77,11 +79,16 @@ class Processor:
         params = {
             'expansion': 'AFR',
             'format': 'PremierDraft',
-            'start_date': '2021-03-17',
+            'start_date': (datetime.datetime.now() - datetime.timedelta(days=60)).strftime("%Y-%m-%d"),
             'end_date': datetime.datetime.now().strftime("%Y-%m-%d")
             }
         response = requests.get(url=url, params=params)
-        self.raw_rankings = response.json()
+        self.raw_rankings = defaultdict(dict)
+        self.raw_rankings['XX'] = response.json()
+        for archetype in self.archetypes[:-1]:
+            params['colors'] = archetype
+            response = requests.get(url=url, params=params)
+            self.raw_rankings[archetype] = response.json()
         with open('resources/rankings.json', 'w') as f:
             json.dump(self.raw_rankings, f)
 
@@ -91,21 +98,24 @@ class Processor:
     def load_rankings(self):
         fname = pathlib.Path("resources/rankings.json")
         mtime = datetime.datetime.fromtimestamp(fname.stat().st_mtime)
-        if mtime < datetime.datetime.now() - datetime.timedelta(days=1):
+        if mtime < datetime.datetime.now() - datetime.timedelta(days=5):
             self.fetch_rankings()
         else:
             with open(fname) as f:
                 self.raw_rankings = json.load(f)
 
     def process_rankings(self):
-        self.ranking_lookup = {}
-        for item in self.raw_rankings:
-            self.ranking_lookup[item['name']] = item
+        self.ranking_lookup = defaultdict(dict)
+        for color_pair in self.archetypes:
+            for item in self.raw_rankings[color_pair]:
+                self.ranking_lookup[color_pair][item['name']] = item
 
-    def ranking(self, card_id: int):
+    def ranking(self, card_id: int, default=False):
         card = self.card(card_id)
         name = card['name']
-        return self.ranking_lookup[name]
+        if default:
+            return self.ranking_lookup['XX'][name]
+        return self.ranking_lookup[self.get_archetype()][name]
 
     def card(self, card_id: int):
         return self.db['cards'][str(card_id)]
@@ -123,30 +133,39 @@ class Processor:
         self.process_pack(doc)
         # report(self.picks)
 
+    def print_card(self, card_id):
+
+        card = self.card(card_id)
+        ranking = self.ranking(card_id)
+        default_ranking = self.ranking(card_id, default=True)
+        color = ranking['color']
+
+        report(f"Color: {color}, "
+               f"Name: {card['name']}, "
+               f"Winrate improvement (default): "
+               f"{default_ranking['drawn_improvement_win_rate']:.0%}, "
+               f"For archetype {self.get_archetype()}: "
+               f"{ranking['drawn_improvement_win_rate']:.0%}, "
+               f"Average Pick: {ranking['avg_pick']:.2f}, ",
+               color=colors.get(color, 'white'))
+
     def print_by_winrate_improvement(self, pack):
         cards = [card for card in pack["card_ids"] if
-                 self.ranking(card)['ever_drawn_game_count'] > 500]
+                 self.ranking(card)['ever_drawn_game_count'] > 300]
         for card_id in sorted(cards,
                               key=lambda card_id: self.ranking(card_id)[
                                   'drawn_improvement_win_rate'],
                               reverse=True):
-            card = self.card(card_id)
-            ranking = self.ranking(card_id)
-            color = ranking['color']
 
-            report(f"Color: {color}, "
-                   f"Name: {card['name']}, "
-                   f"Winrate improvement: {ranking['drawn_improvement_win_rate']:.0%}, "
-                   f"Average Pick: {ranking['avg_pick']:.2f}, ",
-                   color=colors.get(color, 'white'))
+            self.print_card(card_id)
 
     def process_pack(self, doc):
         pack, pick = doc["pack_number"], doc["pick_number"]
-        report(f'\nPack {pack}, Pick: {pick}')
+        report(f'\nPack {pack}, Pick: {pick} == Sorted by avg pick')
 
         for card_id in sorted(doc["card_ids"],
                               key=lambda card_id: self.ranking(card_id)['avg_pick']):
-            card = self.card(card_id)
+
             ranking = self.ranking(card_id)
             color = ranking['color']
 
@@ -154,15 +173,9 @@ class Processor:
                 score = self.calc_score(doc["pick_number"], ranking['avg_pick'])
                 self.signals[color] += score
 
-            report(f"Color: {color}, "
-                   f"Name: {card['name']}, "
-                   f"Average Pick: {ranking['avg_pick']:.2f}, "
-                   f"Winrate opening hand: {ranking['opening_hand_win_rate']:.2f}, "
-                   f"Winrate drawn: {ranking['drawn_win_rate']:.2f}, "
-                   f"Winrate improvement: {ranking['drawn_improvement_win_rate']:.0%}",
-                   color=colors.get(color, 'white'))
+            self.print_card(card_id)
 
-        print("====> Sorted by winrate")
+        print(f"====> Sorted by winrate for archetype {self.get_archetype()}")
         self.print_by_winrate_improvement(doc)
         print("====> Signals")
 
@@ -179,4 +192,21 @@ class Processor:
         print("Printing inventory")
         document = {"card_ids": list(self.picks.values())}
         self.print_by_winrate_improvement(document)
+
+    def get_archetype(self):
+        counter = Counter()
+
+        for pick in self.picks.values():
+            card = self.card(pick)
+            counter.update(card['cost'])
+        for key in list(counter):
+            if key not in list('wubrg'):
+                del counter[key]
+
+        top_two_colors = set([i[0].upper() for i in counter.most_common(2)])
+
+        for archetype in self.archetypes:
+            if set(archetype) == top_two_colors:
+                return archetype
+        return 'XX'
 
