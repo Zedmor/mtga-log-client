@@ -4,6 +4,7 @@ import pathlib
 from collections import Counter, defaultdict
 
 import requests
+from prettytable import PrettyTable
 from termcolor import colored
 
 
@@ -12,6 +13,16 @@ def report(s, color='white'):
 
 
 colors = {'W': 'white', 'G': 'green', 'B': 'yellow', 'U': 'blue', 'R': 'red'}
+
+FIELD_NAMES = ["Color", "Name", "Archetype", "IWD", "IWD Arch", "GIH WR Arch",
+               "GND WR Arch", "GIH WR Default", "GND WR Default", "ALSA", "Sample Size"]
+
+COLOR_BONUSES = {'W': 0.0041, 'U': 0.0042, 'G': 0.0, 'B': 0.0086, 'R': 0.0180}
+
+ARCHETYPE_BONUSES = {
+    'XX': 0, 'WU': 0.0, 'WB': 0.0, 'WR': 0.00, 'WG': 0, 'UB': 0.0, 'UR': 0.0, 'UG': 0.0,
+    'BR': 0.00, 'BG': 0.00, 'RG': 0.00
+    }
 
 worth = {
     1: 15,
@@ -50,7 +61,6 @@ muls = {
 
 
 class Processor:
-
     """
     Requires database.json from MTG Arena tool. Could be found after installing MTG Arena tool
     (https://mtgatool.com/) could find in it github :(
@@ -77,9 +87,10 @@ class Processor:
         url = "https://www.17lands.com/card_ratings/data"
 
         params = {
-            'expansion': 'AFR',
+            'expansion': 'VOW',
             'format': 'PremierDraft',
-            'start_date': (datetime.datetime.now() - datetime.timedelta(days=60)).strftime("%Y-%m-%d"),
+            'start_date': (datetime.datetime.now() - datetime.timedelta(days=60)).strftime(
+                "%Y-%m-%d"),
             'end_date': datetime.datetime.now().strftime("%Y-%m-%d")
             }
         response = requests.get(url=url, params=params)
@@ -92,8 +103,8 @@ class Processor:
         with open('resources/rankings.json', 'w') as f:
             json.dump(self.raw_rankings, f)
 
-    def calc_score(self, pick, avg_pick):
-        return worth[int(avg_pick)] * muls[pick]
+    def calc_score(self, pick, avg_seen):
+        return worth[int(avg_seen)] * muls[pick]
 
     def load_rankings(self):
         fname = pathlib.Path("resources/rankings.json")
@@ -109,6 +120,23 @@ class Processor:
         for color_pair in self.archetypes:
             for item in self.raw_rankings[color_pair]:
                 self.ranking_lookup[color_pair][item['name']] = item
+                if item['color']:
+                    bonus = sum([COLOR_BONUSES[color] for color in list(item['color'])]) / len(
+                        item['color'])
+                else:
+                    bonus = 0
+                if color_pair == 'XX':
+                    across_archetype_bonus = 0
+                    for archetype in self.archetypes[:-1]:
+                        across_archetype_bonus += (self.ranking_lookup[archetype][item['name']]['game_count'] /
+                         self.ranking_lookup['XX'][item['name']]['game_count']) * ARCHETYPE_BONUSES[archetype]
+                    bonus += across_archetype_bonus
+
+                    self.ranking_lookup[color_pair][item['name']][
+                        'drawn_improvement_win_rate'] += bonus
+                else:
+                    self.ranking_lookup[color_pair][item['name']]['drawn_improvement_win_rate'] += \
+                    ARCHETYPE_BONUSES[color_pair]
 
     def ranking(self, card_id: int, default=False):
         card = self.card(card_id)
@@ -133,50 +161,77 @@ class Processor:
         self.process_pack(doc)
         # report(self.picks)
 
-    def print_card(self, card_id):
+    def print_card(self, card_id, table: PrettyTable):
 
         card = self.card(card_id)
         ranking = self.ranking(card_id)
         default_ranking = self.ranking(card_id, default=True)
         color = ranking['color']
 
-        report(f"Color: {color}, "
-               f"Name: {card['name']}, "
-               f"Winrate improvement (default): "
-               f"{default_ranking['drawn_improvement_win_rate']:.0%}, "
-               f"For archetype {self.get_archetype()}: "
-               f"{ranking['drawn_improvement_win_rate']:.0%}, "
-               f"Average Pick: {ranking['avg_pick']:.2f}, ",
-               color=colors.get(color, 'white'))
+        gih_wr = ranking['ever_drawn_win_rate']
+        if not gih_wr:
+            gih_wr = 0
 
-    def print_by_winrate_improvement(self, pack):
+        gnd_wr = ranking['never_drawn_win_rate']
+        if not gnd_wr:
+            gnd_wr = 0
+
+        row = [color,
+               card['name'],
+               self.get_archetype(),
+               f"{default_ranking['drawn_improvement_win_rate']:.1%}",
+               f"{ranking['drawn_improvement_win_rate']:.1%}",
+               f"{gih_wr:.1%}",
+               f"{gnd_wr:.1%}",
+               f"{default_ranking['ever_drawn_win_rate']:.1%}",
+               f"{default_ranking['never_drawn_win_rate']:.1%}",
+               f"{ranking['avg_seen']:.2f}",
+               ranking['ever_drawn_game_count'],
+               ]
+
+        colored_row = [colored(v, colors.get(color, 'white')) for v in row]
+
+        table.add_row(colored_row)
+
+    def print_by_gih_winrate(self, pack):
         cards = [card for card in pack["card_ids"] if
-                 self.ranking(card)['ever_drawn_game_count'] > 300]
+                 self.ranking(card)['ever_drawn_game_count'] > 200]
+
+        table = PrettyTable()
+        table.field_names = FIELD_NAMES
+
         for card_id in sorted(cards,
                               key=lambda card_id: self.ranking(card_id)[
-                                  'drawn_improvement_win_rate'],
+                                  'ever_drawn_win_rate'],
                               reverse=True):
 
-            self.print_card(card_id)
+            self.print_card(card_id, table)
+
+        print(table)
 
     def process_pack(self, doc):
         pack, pick = doc["pack_number"], doc["pick_number"]
-        report(f'\nPack {pack}, Pick: {pick} == Sorted by avg pick')
+        report(f'\nPack {pack}, Pick: {pick} == Sorted by ALSA')
+
+        table = PrettyTable()
+        table.field_names = FIELD_NAMES
 
         for card_id in sorted(doc["card_ids"],
-                              key=lambda card_id: self.ranking(card_id)['avg_pick']):
+                              key=lambda card_id: self.ranking(card_id)['avg_seen']):
 
             ranking = self.ranking(card_id)
             color = ranking['color']
 
             if doc["pack_number"] == 1:
-                score = self.calc_score(doc["pick_number"], ranking['avg_pick'])
+                score = self.calc_score(doc["pick_number"], ranking['avg_seen'])
                 self.signals[color] += score
 
-            self.print_card(card_id)
+            self.print_card(card_id, table)
 
-        print(f"====> Sorted by winrate for archetype {self.get_archetype()}")
-        self.print_by_winrate_improvement(doc)
+        print(table)
+
+        print(f"====> Sorted by GIH for archetype {self.get_archetype()}")
+        self.print_by_gih_winrate(doc)
         print("====> Signals")
 
         self.print_signals()
@@ -191,7 +246,7 @@ class Processor:
     def print_inventory(self):
         print("Printing inventory")
         document = {"card_ids": list(self.picks.values())}
-        self.print_by_winrate_improvement(document)
+        self.print_by_gih_winrate(document)
 
     def get_archetype(self):
         counter = Counter()
@@ -209,4 +264,3 @@ class Processor:
             if set(archetype) == top_two_colors:
                 return archetype
         return 'XX'
-
